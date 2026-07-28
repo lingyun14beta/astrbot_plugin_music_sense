@@ -1,4 +1,4 @@
-"""音频文件工具：从消息链中提取 File 组件、校验格式与大小、读取为 base64。"""
+"""音频文件工具。"""
 
 from __future__ import annotations
 
@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import aiohttp
+
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
 
-# mime type 映射，Gemini 支持的音频格式
 _MIME_MAP: dict[str, str] = {
     "mp3": "audio/mpeg",
     "wav": "audio/wav",
@@ -26,27 +27,48 @@ _MIME_MAP: dict[str, str] = {
 
 @dataclass
 class AudioFile:
-    """已校验并读取完毕的音频文件。"""
-
     b64: str
     mime_type: str
     filename: str
 
 
 class AudioError(Exception):
-    """音频处理错误，message 可直接透传给 LLM。"""
+    """音频处理错误。"""
 
 
 def _get_ext(name: str) -> str:
     return Path(name).suffix.lstrip(".").lower()
 
 
-def extract_file_component(event: AstrMessageEvent):
-    """从消息链（含引用消息）中提取第一个 File 组件。
+def resolve_component_ref(comp) -> tuple[str, str]:
+    """从 File 组件提取 (local_path, remote_url)。local_path 为空时返回空字符串。"""
+    local = ""
+    url = ""
 
-    优先检查当前消息链，找不到则检查 Reply 组件内的嵌套消息链。
-    返回 File 组件实例，或 None。
-    """
+    raw_file = getattr(comp, "file_", "") or ""
+    raw_url = getattr(comp, "url", "") or ""
+
+    if raw_file:
+        if raw_file.startswith("file://") or raw_file.startswith("file:"):
+            try:
+                from urllib.parse import unquote, urlparse
+                parsed = urlparse(raw_file)
+                local = unquote(parsed.path)
+                if local and local[0] == "/" and len(local) > 2 and local[2] == ":":
+                    local = local[1:]  # Windows: /C:/... → C:/...
+            except Exception:
+                local = raw_file
+        else:
+            local = raw_file
+
+    if raw_url:
+        url = raw_url
+
+    return local, url
+
+
+def extract_file_component(event: AstrMessageEvent):
+    """从消息链（含引用消息）中提取第一个 File 组件。"""
     messages = _get_messages(event)
 
     file_comp = _find_file_in_chain(messages)
@@ -83,48 +105,64 @@ def _get_messages(event: AstrMessageEvent) -> list:
     return []
 
 
-async def load_audio(
-    file_comp,
-    supported_formats: list[str],
-    max_size_mb: int,
-) -> AudioFile:
-    """校验并读取 File 组件为 AudioFile。
-
-    Args:
-        file_comp: AstrBot File 消息组件实例。
-        supported_formats: 允许的扩展名列表，如 ['mp3', 'wav']。
-        max_size_mb: 文件大小上限（MB）。
-
-    Raises:
-        AudioError: 格式不支持、文件过大、读取失败等，message 可透传给 LLM。
-    """
+async def load_audio(file_comp, supported_formats: list[str], max_size_mb: int) -> AudioFile:
+    """校验并读取 File 组件为 AudioFile。"""
     name: str = getattr(file_comp, "name", "") or ""
     ext = _get_ext(name)
 
     if ext not in supported_formats:
         supported_str = "、".join(supported_formats)
-        raise AudioError(
-            f"文件格式 .{ext} 不支持，当前支持的格式：{supported_str}。",
-        )
-
-    mime_type = _MIME_MAP.get(ext, f"audio/{ext}")
+        raise AudioError(f"文件格式 .{ext} 不支持，当前支持的格式：{supported_str}。")
 
     try:
         local_path: str = await file_comp.get_file()
     except Exception as e:
         raise AudioError(f"获取文件失败：{e}") from e
 
-    p = Path(local_path) if local_path else None
-    if not p or not p.is_file():
+    return await _read_and_validate(local_path, ext, max_size_mb, name)
+
+
+async def load_audio_from_path(file_path: str, max_size_mb: int) -> AudioFile:
+    """从本地路径读取音频文件为 AudioFile。"""
+    p = Path(file_path)
+    if not p.is_file():
+        raise AudioError(f"文件不存在或无法访问：{file_path}")
+
+    ext = _get_ext(p.name)
+    return await _read_and_validate(str(p), ext, max_size_mb, p.name)
+
+
+async def download_audio_file(url: str, save_name: str, timeout: int = 120) -> Path:
+    """下载远程音频到临时目录。"""
+    import tempfile
+
+    tmp_dir = Path(tempfile.gettempdir()) / "astrbot_music_sense"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    dest = tmp_dir / save_name
+
+    timeout_obj = aiohttp.ClientTimeout(total=timeout)
+    async with aiohttp.ClientSession(timeout=timeout_obj, trust_env=False) as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                raise AudioError(f"下载音频失败：HTTP {resp.status}")
+            data = await resp.read()
+
+    await asyncio.to_thread(dest.write_bytes, data)
+    return dest
+
+
+async def _read_and_validate(local_path: str, ext: str, max_size_mb: int, filename: str) -> AudioFile:
+    p = Path(local_path)
+    if not p.is_file():
         raise AudioError("文件不存在或无法访问，请确认文件已上传完成。")
 
     size_bytes = p.stat().st_size
     max_bytes = max_size_mb * 1024 * 1024
     if size_bytes > max_bytes:
         size_mb = size_bytes / 1024 / 1024
-        raise AudioError(
-            f"文件大小 {size_mb:.1f} MB 超过限制 {max_size_mb} MB，请上传较小的文件。",
-        )
+        raise AudioError(f"文件大小 {size_mb:.1f} MB 超过限制 {max_size_mb} MB。")
+
+    mime_type = _MIME_MAP.get(ext, f"audio/{ext}")
 
     try:
         raw = await asyncio.to_thread(p.read_bytes)
@@ -132,4 +170,4 @@ async def load_audio(
         raise AudioError(f"读取文件失败：{e}") from e
 
     b64 = base64.b64encode(raw).decode("ascii")
-    return AudioFile(b64=b64, mime_type=mime_type, filename=name)
+    return AudioFile(b64=b64, mime_type=mime_type, filename=filename)

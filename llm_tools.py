@@ -1,13 +1,13 @@
-"""LLM 工具业务逻辑，与 AstrBot 框架解耦。
-
-main.py 中的 @llm_tool 方法只做参数校验和转发，
-实际分析逻辑全部在这里，方便独立测试和复用。
-"""
+"""LLM 工具业务逻辑。"""
 
 from __future__ import annotations
 
-from .audio_utils import AudioError, extract_file_component, load_audio
-from .gemini_client import GeminiClient, GeminiClientError
+try:
+    from .audio_utils import AudioError, download_audio_file, extract_file_component, load_audio, load_audio_from_path
+    from .gemini_client import GeminiClient, GeminiClientError
+except ImportError:
+    from audio_utils import AudioError, download_audio_file, extract_file_component, load_audio, load_audio_from_path
+    from gemini_client import GeminiClient, GeminiClientError
 
 
 async def run_audio_analysis(
@@ -16,11 +16,7 @@ async def run_audio_analysis(
     max_size_mb: int,
     client: GeminiClient,
 ) -> str:
-    """执行音频分析，返回适合作为 llm_tool 返回值的字符串。
-
-    成功返回分析结果描述；失败返回错误说明（均可直接被 LLM 引用）。
-    调用方负责 client 的生命周期（close）。
-    """
+    """从当前 event 的 File 组件执行音频分析。"""
     file_comp = extract_file_component(event)
     if file_comp is None:
         return "当前消息中没有找到音频文件，无法进行分析。"
@@ -32,3 +28,41 @@ async def run_audio_analysis(
         return f"音频分析失败：{e}"
     else:
         return f"音频分析结果：{result}"
+
+
+async def run_audio_analysis_from_path(
+    file_path: str,
+    max_size_mb: int,
+    client: GeminiClient,
+) -> str:
+    """从本地文件路径执行音频分析。"""
+    try:
+        audio = await load_audio_from_path(file_path, max_size_mb)
+        result = await client.analyze(audio.b64, audio.mime_type)
+    except (AudioError, GeminiClientError) as e:
+        return f"音频分析失败：{e}"
+    else:
+        return result
+
+
+async def resolve_audio_ref(
+    item: dict,
+    max_size_mb: int,
+) -> str:
+    """将缓存的音频引用解析为可用路径。local 直接用，remote 按需下载。"""
+    ref = item["ref"]
+    if not ref:
+        raise AudioError("文件引用为空。")
+
+    if item["is_local"]:
+        from pathlib import Path
+        if Path(ref).is_file():
+            return ref
+        raise AudioError(f"文件已过期或不可访问：{ref}")
+
+    # 远程 URL，按需下载
+    name = item.get("name", "audio")
+    dest = await download_audio_file(ref, name)
+    item["ref"] = str(dest)
+    item["is_local"] = True
+    return str(dest)
