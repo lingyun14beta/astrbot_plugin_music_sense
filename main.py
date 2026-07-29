@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, llm_tool, logger
@@ -175,9 +174,10 @@ class MusicSensePlugin(Star):
     async def _auto_analyze_task(self, umo: str, item: dict) -> None:
         """后台自动分析音频，可选注入对话上下文。"""
         async with self._auto_sem:
-            try:
+            async with self._lock:
                 if item["result"]:
-                    return  # 已分析过
+                    return
+            try:
                 resolved = await resolve_audio_ref(item, self._max_size_mb)
             except AudioError:
                 logger.warning("[MusicSense] 自动分析：文件不可用 %s", item.get("name"))
@@ -199,7 +199,11 @@ class MusicSensePlugin(Star):
                 await self._inject_analysis_to_context(umo, item["name"], result)
 
     async def _inject_analysis_to_context(self, umo: str, name: str, result: str) -> None:
-        """将分析结果追加到对话历史。"""
+        """将分析结果追加到对话历史。
+
+        注意：直接操作 conv.history 并回写 DB，与主代理的历史写入存在竞态。
+        最坏情况：注入的消息在当轮被主代理覆盖，但缓存结果不受影响。
+        """
         import json as _json
         try:
             cm = self.context.conversation_manager
@@ -214,7 +218,6 @@ class MusicSensePlugin(Star):
                 "role": "user",
                 "content": f"[音乐感知] 刚刚收到的音频「{name}」分析：{result}",
             }
-            # 避免重复注入
             for msg in reversed(history[-5:]):
                 if isinstance(msg, dict) and msg.get("content") == inject_msg["content"]:
                     return
