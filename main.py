@@ -32,6 +32,12 @@ _DEFAULT_SYSTEM_PROMPT = (
     "氛围、风格和节奏感。不要用列表，像聊天一样说话，100字以内。"
 )
 
+_ERROR_PREFIXES = ("文件处理失败", "音频分析失败")
+
+
+def _is_error(text: str) -> bool:
+    return text.startswith(_ERROR_PREFIXES)
+
 
 class _FileComponentFilter(CustomFilter):
     """匹配含有 File 组件的消息（含引用消息），用于缓存音频元数据。"""
@@ -192,11 +198,11 @@ class MusicSensePlugin(Star):
             finally:
                 await client.close()
 
-            async with self._lock:
-                item["result"] = result
-
-            if self._inject_context:
-                await self._inject_analysis_to_context(umo, item["name"], result)
+            if not _is_error(result):
+                async with self._lock:
+                    item["result"] = result
+                if self._inject_context:
+                    await self._inject_analysis_to_context(umo, item["name"], result)
 
     async def _inject_analysis_to_context(self, umo: str, name: str, result: str) -> None:
         """将分析结果追加到对话历史。
@@ -240,13 +246,14 @@ class MusicSensePlugin(Star):
             yield event.plain_result("正在分析音乐，请稍候...")
             result = await self._analyze_file_comp(file_comp, extra)
             yield event.plain_result(result)
-            # 同步缓存结果
-            name = getattr(file_comp, "name", "") or ""
-            async with self._lock:
-                for item in self._registry.get(event.unified_msg_origin, []):
-                    if item["name"] == name and item["result"] is None:
-                        item["result"] = result
-                        break
+            # 同步缓存结果（排除错误）
+            if not _is_error(result):
+                name = getattr(file_comp, "name", "") or ""
+                async with self._lock:
+                    for item in self._registry.get(event.unified_msg_origin, []):
+                        if item["name"] == name and item["result"] is None:
+                            item["result"] = result
+                            break
             return
 
         # 当前消息和引用消息中都没有 File 组件，尝试从缓存取
@@ -299,8 +306,9 @@ class MusicSensePlugin(Star):
         client = self._make_client(question)
         try:
             result = await run_audio_analysis_from_path(resolved, self._max_size_mb, client)
-            async with self._lock:
-                item["result"] = result
+            if not _is_error(result):
+                async with self._lock:
+                    item["result"] = result
             yield event.plain_result(f"「{item['name']}」{result}")
         finally:
             await client.close()
@@ -378,8 +386,9 @@ class MusicSensePlugin(Star):
         client = self._make_client()
         try:
             result = await run_audio_analysis_from_path(resolved_path, self._max_size_mb, client)
-            async with self._lock:
-                item["result"] = result
+            if not _is_error(result):
+                async with self._lock:
+                    item["result"] = result
             return f"「{item['name']}」{result}"
         finally:
             await client.close()
