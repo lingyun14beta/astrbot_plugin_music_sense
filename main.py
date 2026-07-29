@@ -63,6 +63,7 @@ class MusicSensePlugin(Star):
         super().__init__(context)
         self.config: AstrBotConfig = config or {}
         self._registry: dict[str, list[dict]] = {}
+        self._pending_injections: dict[str, list[dict]] = {}
         self._lock = asyncio.Lock()
         self._auto_sem = asyncio.Semaphore(3)  # 最多 3 个并发自动分析
         logger.info("[MusicSense] 插件已加载，支持格式：%s", self._supported_formats)
@@ -201,35 +202,21 @@ class MusicSensePlugin(Star):
                 async with self._lock:
                     item["result"] = result
                 if self._inject_context:
-                    await self._inject_analysis_to_context(umo, item["name"], result)
+                    async with self._lock:
+                        self._pending_injections.setdefault(umo, []).append({
+                            "role": "user",
+                            "content": f"[音乐感知] 刚刚收到的音频「{item['name']}」分析：{result}",
+                        })
 
-    async def _inject_analysis_to_context(self, umo: str, name: str, result: str) -> None:
-        """将分析结果追加到对话历史。
-
-        注意：直接操作 conv.history 并回写 DB，与主代理的历史写入存在竞态。
-        最坏情况：注入的消息在当轮被主代理覆盖，但缓存结果不受影响。
-        """
-        import json as _json
-        try:
-            cm = self.context.conversation_manager
-            cid = await cm.get_curr_conversation_id(umo)
-            if not cid:
-                return
-            conv = await cm.get_conversation(umo, cid)
-            if not conv:
-                return
-            history = _json.loads(conv.history)
-            inject_msg = {
-                "role": "user",
-                "content": f"[音乐感知] 刚刚收到的音频「{name}」分析：{result}",
-            }
-            for msg in reversed(history[-5:]):
-                if isinstance(msg, dict) and msg.get("content") == inject_msg["content"]:
-                    return
-            history.append(inject_msg)
-            await cm._db.update_conversation(cid=cid, content=_json.dumps(history, ensure_ascii=False))
-        except Exception:
-            logger.warning("[MusicSense] 注入上下文失败：%s", name, exc_info=True)
+    @astr_filter.on_llm_request()
+    async def _on_llm_request(self, event: AstrMessageEvent, req):
+        """每次 LLM 请求前注入待发送的分析结果。"""
+        if not self._inject_context:
+            return
+        async with self._lock:
+            pending = self._pending_injections.pop(event.unified_msg_origin, [])
+        if pending:
+            req.contexts.extend(pending)
 
     # ------------------------------------------------------------------
     # 指令处理
@@ -430,6 +417,7 @@ class MusicSensePlugin(Star):
 
     async def terminate(self) -> None:
         self._registry.clear()
+        self._pending_injections.clear()
         logger.info("[MusicSense] 插件已卸载")
 
 
