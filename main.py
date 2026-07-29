@@ -3,8 +3,8 @@
 通过 Gemini 原生多模态音频理解，分析群里分享的音频文件，
 将结果注入对话历史，让 Bot 能就音乐展开自然对话。
 
-触发方式：
-  - /分析音频 [追问] + 音频文件 或 引用音频消息
+ 触发方式：
+  - /分析音频 [序号] [追问] + 音频文件 或 引用音频消息
   - LLM 工具 list_audio_files / analyze_audio_by_number
 """
 
@@ -17,7 +17,7 @@ from astrbot.api import AstrBotConfig, llm_tool, logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.event import filter as astr_filter
 from astrbot.api.star import Context, Star, register
-from astrbot.core.star.filter.custom_filter import CustomFilter
+from astrbot.api.event.filter import CustomFilter
 
 from .audio_utils import AudioError, extract_file_component, load_audio, resolve_component_ref
 from .gemini_client import GeminiClient, GeminiClientError
@@ -166,7 +166,15 @@ class MusicSensePlugin(Star):
 
         if file_comp is not None:
             yield event.plain_result("正在分析音乐，请稍候...")
-            yield event.plain_result(await self._analyze_file_comp(file_comp, extra))
+            result = await self._analyze_file_comp(file_comp, extra)
+            yield event.plain_result(result)
+            # 同步缓存结果
+            name = getattr(file_comp, "name", "") or ""
+            async with self._lock:
+                for item in self._registry.get(event.unified_msg_origin, []):
+                    if item["name"] == name and item["result"] is None:
+                        item["result"] = result
+                        break
             return
 
         # 当前消息和引用消息中都没有 File 组件，尝试从缓存取
