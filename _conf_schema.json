@@ -101,6 +101,18 @@
         "type": "bool",
         "default": true
       },
+      "auto_analyze": {
+        "description": "自动分析音频",
+        "hint": "开启后，收到音频文件时自动调用 Gemini 分析，无需等待用户指令。仅本地文件生效。⚠ 每个音频都会消耗一次 API 调用。",
+        "type": "bool",
+        "default": false
+      },
+      "inject_context": {
+        "description": "注入分析结果到对话上下文",
+        "hint": "开启后，自动分析的结果会追加到对话历史中，LLM 可直接感知无需调用工具。需同时开启「自动分析音频」。",
+        "type": "bool",
+        "default": false
+      },
       "max_file_size_mb": {
         "description": "最大文件大小（MB）",
         "hint": "超过此大小的音频文件将被拒绝处理。",

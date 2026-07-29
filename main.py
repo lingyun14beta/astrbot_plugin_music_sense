@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, llm_tool, logger
@@ -59,6 +60,7 @@ class MusicSensePlugin(Star):
         self.config: AstrBotConfig = config or {}
         self._registry: dict[str, list[dict]] = {}
         self._lock = asyncio.Lock()
+        self._auto_sem = asyncio.Semaphore(3)  # 最多 3 个并发自动分析
         logger.info("[MusicSense] 插件已加载，支持格式：%s", self._supported_formats)
 
     # ------------------------------------------------------------------
@@ -83,6 +85,14 @@ class MusicSensePlugin(Star):
     @property
     def _system_prompt(self) -> str:
         return self._analysis_cfg.get("system_prompt", _DEFAULT_SYSTEM_PROMPT).strip()
+
+    @property
+    def _auto_analyze(self) -> bool:
+        return bool(self._analysis_cfg.get("auto_analyze", False))
+
+    @property
+    def _inject_context(self) -> bool:
+        return bool(self._analysis_cfg.get("inject_context", False))
 
     def _resolve_provider_and_model(self) -> tuple[dict, str]:
         providers: list = self.config.get("api_provider", [])
@@ -142,17 +152,76 @@ class MusicSensePlugin(Star):
             else:
                 items.append({"name": name, "ref": url or local, "is_local": False, "result": None})
 
+        new_items = []
         async with self._lock:
             items = self._registry.setdefault(umo, [])
             for comp in getattr(event.message_obj, "message", []):
                 if type(comp).__name__ == "File":
                     _cache(comp, items)
+                    new_items.append(items[-1])
                 elif type(comp).__name__ == "Reply":
                     for rc in getattr(comp, "chain", []) or []:
                         if type(rc).__name__ == "File":
                             _cache(rc, items)
+                            new_items.append(items[-1])
+
+        if self._auto_analyze:
+            for item in new_items:
+                if item["is_local"]:
+                    asyncio.create_task(self._auto_analyze_task(umo, item))
 
         yield
+
+    async def _auto_analyze_task(self, umo: str, item: dict) -> None:
+        """后台自动分析音频，可选注入对话上下文。"""
+        async with self._auto_sem:
+            try:
+                if item["result"]:
+                    return  # 已分析过
+                resolved = await resolve_audio_ref(item, self._max_size_mb)
+            except AudioError:
+                logger.warning("[MusicSense] 自动分析：文件不可用 %s", item.get("name"))
+                return
+
+            client = self._make_client()
+            try:
+                result = await run_audio_analysis_from_path(resolved, self._max_size_mb, client)
+            except Exception:
+                logger.warning("[MusicSense] 自动分析失败：%s", item.get("name"), exc_info=True)
+                return
+            finally:
+                await client.close()
+
+            async with self._lock:
+                item["result"] = result
+
+            if self._inject_context:
+                await self._inject_analysis_to_context(umo, item["name"], result)
+
+    async def _inject_analysis_to_context(self, umo: str, name: str, result: str) -> None:
+        """将分析结果追加到对话历史。"""
+        import json as _json
+        try:
+            cm = self.context.conversation_manager
+            cid = await cm.get_curr_conversation_id(umo)
+            if not cid:
+                return
+            conv = await cm.get_conversation(umo, cid)
+            if not conv:
+                return
+            history = _json.loads(conv.history)
+            inject_msg = {
+                "role": "user",
+                "content": f"[音乐感知] 刚刚收到的音频「{name}」分析：{result}",
+            }
+            # 避免重复注入
+            for msg in reversed(history[-5:]):
+                if isinstance(msg, dict) and msg.get("content") == inject_msg["content"]:
+                    return
+            history.append(inject_msg)
+            await cm._db.update_conversation(cid=cid, content=_json.dumps(history, ensure_ascii=False))
+        except Exception:
+            logger.warning("[MusicSense] 注入上下文失败：%s", name, exc_info=True)
 
     # ------------------------------------------------------------------
     # 指令处理
