@@ -111,7 +111,11 @@
         "description": "注入分析结果到对话上下文",
         "hint": "开启后，自动分析的结果会追加到对话历史中，LLM 可直接感知无需调用工具。需同时开启「自动分析音频」。",
         "type": "bool",
-        "default": false
+        "default": false,
+        "collapsed": true,
+        "condition": {
+          "auto_analyze": true
+        }
       },
       "max_file_size_mb": {
         "description": "最大文件大小（MB）",
