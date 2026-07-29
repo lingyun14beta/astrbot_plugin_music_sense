@@ -327,7 +327,7 @@ class MusicSensePlugin(Star):
 
         client = self._make_client()
         try:
-            return await run_audio_analysis(
+            result = await run_audio_analysis(
                 event,
                 self._supported_formats,
                 self._max_size_mb,
@@ -335,6 +335,16 @@ class MusicSensePlugin(Star):
             )
         finally:
             await client.close()
+
+        file_comp = extract_file_component(event)
+        if file_comp and not _is_error(result):
+            name = getattr(file_comp, "name", "") or ""
+            async with self._lock:
+                for item in self._registry.get(event.unified_msg_origin, []):
+                    if item["name"] == name and item["result"] is None:
+                        item["result"] = result
+                        break
+        return result
 
     @llm_tool("list_audio_files")
     async def list_audio_files(self, event: AstrMessageEvent):

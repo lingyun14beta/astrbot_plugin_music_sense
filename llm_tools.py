@@ -27,7 +27,7 @@ async def run_audio_analysis(
     except (AudioError, GeminiClientError) as e:
         return f"音频分析失败：{e}"
     else:
-        return f"音频分析结果：{result}"
+        return result
 
 
 async def run_audio_analysis_from_path(
