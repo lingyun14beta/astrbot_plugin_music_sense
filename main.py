@@ -165,11 +165,15 @@ class MusicSensePlugin(Star):
             name = getattr(comp, "name", "") or ""
             ext = Path(name).suffix.lstrip(".").lower()
             if ext not in self._supported_formats:
+                if self._debug:
+                    logger.info("[MusicSense] 跳过非音频文件：%s (扩展名 .%s)", name or "(无名称)", ext)
                 return
             local, url = resolve_component_ref(comp)
             if local and Path(local).is_file():
                 items.append({"name": name, "ref": local, "is_local": True, "result": None})
             else:
+                if self._debug and url:
+                    logger.info("[MusicSense] 远程文件暂不自动分析：%s", name)
                 items.append({"name": name, "ref": url or local, "is_local": False, "result": None})
 
         new_items = []
@@ -186,11 +190,18 @@ class MusicSensePlugin(Star):
                             new_items.append(items[-1])
 
         if self._auto_analyze:
+            triggered = 0
             for item in new_items:
                 if item["is_local"]:
                     if self._debug:
                         logger.info("[MusicSense] 触发自动分析：%s", item.get("name"))
                     asyncio.create_task(self._auto_analyze_task(umo, item))
+                    triggered += 1
+            if self._debug and new_items and not triggered:
+                logger.info("[MusicSense] 所有新文件均为远程，跳过自动分析")
+
+        if self._debug and new_items:
+            logger.info("[MusicSense] 缓存完成：%d 个音频文件", len(new_items))
 
         yield
 
