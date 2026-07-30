@@ -133,6 +133,12 @@
           "auto_analyze": true
         }
       },
+      "debug": {
+        "description": "调试模式",
+        "hint": "开启后，自动分析和缓存操作会在日志中输出详细信息，方便排查问题。",
+        "type": "bool",
+        "default": false
+      },
       "max_file_size_mb": {
         "description": "最大文件大小（MB）",
         "hint": "超过此大小的音频文件将被拒绝处理。",

@@ -104,6 +104,10 @@ class MusicSensePlugin(Star):
         return bool(self._analysis_cfg.get("separate_prompts", False))
 
     @property
+    def _debug(self) -> bool:
+        return bool(self._analysis_cfg.get("debug", False))
+
+    @property
     def _command_system_prompt(self) -> str:
         return self._analysis_cfg.get("command_system_prompt", _DEFAULT_SYSTEM_PROMPT).strip()
 
@@ -184,6 +188,8 @@ class MusicSensePlugin(Star):
         if self._auto_analyze:
             for item in new_items:
                 if item["is_local"]:
+                    if self._debug:
+                        logger.info("[MusicSense] 触发自动分析：%s", item.get("name"))
                     asyncio.create_task(self._auto_analyze_task(umo, item))
 
         yield
@@ -212,6 +218,8 @@ class MusicSensePlugin(Star):
             if not _is_error(result):
                 async with self._lock:
                     item["result"] = result
+                if self._debug:
+                    logger.info("[MusicSense] 自动分析完成：%s", item.get("name"))
                 if self._inject_context:
                     async with self._lock:
                         self._pending_injections.setdefault(umo, []).append({
@@ -227,6 +235,8 @@ class MusicSensePlugin(Star):
         async with self._lock:
             pending = self._pending_injections.pop(event.unified_msg_origin, [])
         if pending:
+            if self._debug:
+                logger.info("[MusicSense] 注入 %d 条分析到上下文", len(pending))
             req.contexts.extend(pending)
 
     # ------------------------------------------------------------------
