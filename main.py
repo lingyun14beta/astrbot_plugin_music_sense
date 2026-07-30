@@ -99,6 +99,14 @@ class MusicSensePlugin(Star):
     def _inject_context(self) -> bool:
         return bool(self._analysis_cfg.get("inject_context", False))
 
+    @property
+    def _separate_prompts(self) -> bool:
+        return bool(self._analysis_cfg.get("separate_prompts", False))
+
+    @property
+    def _command_system_prompt(self) -> str:
+        return self._analysis_cfg.get("command_system_prompt", _DEFAULT_SYSTEM_PROMPT).strip()
+
     def _resolve_provider_and_model(self) -> tuple[dict, str]:
         providers: list = self.config.get("api_provider", [])
         if not isinstance(providers, list):
@@ -124,9 +132,12 @@ class MusicSensePlugin(Star):
 
         return fallback_provider, fallback_model
 
-    def _make_client(self, extra_prompt: str = "") -> GeminiClient:
+    def _make_client(self, extra_prompt: str = "", use_command_prompt: bool = False) -> GeminiClient:
         provider, model = self._resolve_provider_and_model()
-        sp = self._system_prompt
+        if self._separate_prompts and use_command_prompt:
+            sp = self._command_system_prompt
+        else:
+            sp = self._system_prompt
         if extra_prompt:
             sp = f"{sp}\n\n用户的追加问题：{extra_prompt}"
         return GeminiClient(
@@ -230,7 +241,7 @@ class MusicSensePlugin(Star):
 
         if file_comp is not None:
             yield event.plain_result("正在分析音乐，请稍候...")
-            result = await self._analyze_file_comp(file_comp, extra)
+            result = await self._analyze_file_comp(file_comp, extra, use_command_prompt=True)
             yield event.plain_result(result)
             # 同步缓存结果（排除错误）
             if not _is_error(result):
@@ -289,7 +300,7 @@ class MusicSensePlugin(Star):
             return
 
         yield event.plain_result(f"正在分析「{item['name']}」，请稍候...")
-        client = self._make_client(question)
+        client = self._make_client(question, use_command_prompt=True)
         try:
             result = await run_audio_analysis_from_path(resolved, self._max_size_mb, client)
             if not _is_error(result):
@@ -393,8 +404,8 @@ class MusicSensePlugin(Star):
     # 核心分析逻辑
     # ------------------------------------------------------------------
 
-    async def _analyze_file_comp(self, file_comp, extra_prompt: str = "") -> str:
-        client = self._make_client(extra_prompt)
+    async def _analyze_file_comp(self, file_comp, extra_prompt: str = "", use_command_prompt: bool = False) -> str:
+        client = self._make_client(extra_prompt, use_command_prompt)
         try:
             audio = await load_audio(
                 file_comp,

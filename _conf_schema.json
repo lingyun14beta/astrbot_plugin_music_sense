@@ -91,9 +91,25 @@
       },
       "system_prompt": {
         "description": "分析系统提示词",
-        "hint": "发给 Gemini 的分析指令，告诉它如何描述音乐。",
+        "hint": "发给 Gemini 的分析指令，告诉它如何描述音乐。用于自动分析和 LLM 工具触发。",
         "type": "text",
         "default": "像一个懂音乐的朋友随便聊聊这段音乐，突出你最想说的。不要列表。60字以内。"
+      },
+      "separate_prompts": {
+        "description": "指令触发使用不同提示词",
+        "hint": "开启后，「/分析音频」指令触发时使用下方独立的提示词，自动分析和 LLM 工具仍使用上方提示词。",
+        "type": "bool",
+        "default": false
+      },
+      "command_system_prompt": {
+        "description": "指令触发提示词",
+        "hint": "仅「/分析音频」指令触发时使用。",
+        "type": "text",
+        "default": "像一个懂音乐的朋友随便聊聊这段音乐，突出你最想说的。不要列表。60字以内。",
+        "collapsed": true,
+        "condition": {
+          "separate_prompts": true
+        }
       },
       "enable_llm_tool": {
         "description": "启用 LLM 工具调用",
