@@ -181,13 +181,17 @@ class MusicSensePlugin(Star):
             items = self._registry.setdefault(umo, [])
             for comp in getattr(event.message_obj, "message", []):
                 if type(comp).__name__ == "File":
+                    before = len(items)
                     _cache(comp, items)
-                    new_items.append(items[-1])
+                    if len(items) > before:
+                        new_items.append(items[-1])
                 elif type(comp).__name__ == "Reply":
                     for rc in getattr(comp, "chain", []) or []:
                         if type(rc).__name__ == "File":
+                            before = len(items)
                             _cache(rc, items)
-                            new_items.append(items[-1])
+                            if len(items) > before:
+                                new_items.append(items[-1])
 
         if self._auto_analyze:
             triggered = 0
