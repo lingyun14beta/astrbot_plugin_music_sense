@@ -52,6 +52,7 @@ def resolve_component_ref(comp) -> tuple[str, str]:
         if raw_file.startswith("file://") or raw_file.startswith("file:"):
             try:
                 from urllib.parse import unquote, urlparse
+
                 parsed = urlparse(raw_file)
                 local = unquote(parsed.path)
                 if local and local[0] == "/" and len(local) > 2 and local[2] == ":":
@@ -105,7 +106,9 @@ def _get_messages(event: AstrMessageEvent) -> list:
     return []
 
 
-async def load_audio(file_comp, supported_formats: list[str], max_size_mb: int) -> AudioFile:
+async def load_audio(
+    file_comp, supported_formats: list[str], max_size_mb: int
+) -> AudioFile:
     """校验并读取 File 组件为 AudioFile。"""
     name: str = getattr(file_comp, "name", "") or ""
     ext = _get_ext(name)
@@ -151,7 +154,9 @@ async def download_audio_file(url: str, save_name: str, timeout: int = 120) -> P
     return dest
 
 
-async def _read_and_validate(local_path: str, ext: str, max_size_mb: int, filename: str) -> AudioFile:
+async def _read_and_validate(
+    local_path: str, ext: str, max_size_mb: int, filename: str
+) -> AudioFile:
     p = Path(local_path)
     if not p.is_file():
         raise AudioError("文件不存在或无法访问，请确认文件已上传完成。")

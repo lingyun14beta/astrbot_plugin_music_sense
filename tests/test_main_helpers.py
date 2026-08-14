@@ -1,0 +1,306 @@
+"""main.py 纯函数测试（打桩 astrbot 依赖，不启动插件）。"""
+
+from __future__ import annotations
+
+import importlib
+import sys
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+from unittest.mock import AsyncMock
+
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _stub_astrbot():
+    """在 sys.modules 中打桩 astrbot 包，使 main.py 可独立导入。"""
+    stub_modules: dict[str, ModuleType] = {}
+    for name in ("astrbot", "astrbot.api", "astrbot.api.event", "astrbot.api.star"):
+        m = ModuleType(name)
+        stub_modules[name] = m
+        sys.modules[name] = m
+
+    stub_modules["astrbot.api"].AstrBotConfig = dict
+    stub_modules["astrbot.api"].llm_tool = lambda name=None: lambda f: f
+    stub_modules["astrbot.api"].logger = SimpleNamespace(
+        info=lambda *a, **k: None,
+        warning=lambda *a, **k: None,
+        error=lambda *a, **k: None,
+    )
+    stub_modules["astrbot.api.event"].AstrMessageEvent = type(
+        "AstrMessageEvent", (), {}
+    )
+
+    class _MessageChainStub:
+        def __init__(self):
+            self._text = ""
+
+        def message(self, text):
+            self._text = str(text)
+            return self
+
+        def __str__(self):
+            return self._text
+
+    stub_modules["astrbot.api.event"].MessageChain = _MessageChainStub
+
+    filter_mod = ModuleType("astrbot.api.event.filter")
+    filter_mod.CustomFilter = type("CustomFilter", (), {})
+    filter_mod.custom_filter = lambda cls: lambda f: f
+    filter_mod.command = lambda name=None: lambda f: f
+    filter_mod.on_llm_request = lambda: lambda f: f
+    sys.modules["astrbot.api.event.filter"] = filter_mod
+
+    stub_modules["astrbot.api.star"].Context = type("Context", (), {})
+
+    class _StarStub:
+        def __init__(self, context, config=None):
+            self.context = context
+
+    stub_modules["astrbot.api.star"].Star = _StarStub
+
+
+def _import_main():
+    _stub_astrbot()
+    pkg = ModuleType("astrbot_plugin_music_sense")
+    pkg.__path__ = [str(PLUGIN_ROOT)]
+    sys.modules["astrbot_plugin_music_sense"] = pkg
+    return importlib.import_module("astrbot_plugin_music_sense.main")
+
+
+_main = _import_main()
+
+
+class TestIsError:
+    def test_file_error(self):
+        assert _main._is_error("文件处理失败：格式不支持") is True
+
+    def test_analysis_error(self):
+        assert _main._is_error("音频分析失败：API 超时") is True
+
+    def test_normal_result(self):
+        assert _main._is_error("这是一首轻快的歌") is False
+
+    def test_empty(self):
+        assert _main._is_error("") is False
+
+
+class TestExtractExtra:
+    def test_slash_command(self):
+        assert _main._extract_extra("/分析音频 1 追问内容", "分析音频") == "1 追问内容"
+
+    def test_slash_command_no_extra(self):
+        assert _main._extract_extra("/分析音频", "分析音频") == ""
+
+    def test_plain_command(self):
+        assert _main._extract_extra("分析音频 1", "分析音频") == "1"
+
+    def test_empty_message(self):
+        assert _main._extract_extra("", "分析音频") == ""
+
+    def test_unrelated_message(self):
+        assert _main._extract_extra("hello", "分析音频") == ""
+
+    def test_multi_space(self):
+        assert (
+            _main._extract_extra("/分析音频   1   这首歌", "分析音频")
+            == "1   这首歌"
+        )
+
+
+class TestBackgroundAnalysis:
+    """LLM 工具后台分析：立即返回 + 结果主动发送 + 异常兜底。"""
+
+    def _make_plugin(self, send_side_effect=None):
+        send = AsyncMock(side_effect=send_side_effect)
+        context = SimpleNamespace(send_message=send)
+        plugin = _main.MusicSensePlugin(context=context, config={})
+        return plugin, send
+
+    async def test_result_sent_to_session(self):
+        plugin, send = self._make_plugin()
+
+        async def fake_coro():
+            return "分析结果"
+
+        plugin._run_background_analysis("umo1", fake_coro())
+        task = next(iter(plugin._bg_tasks))
+        await task
+
+        send.assert_awaited_once()
+        args = send.await_args
+        assert args.args[0] == "umo1"
+        assert "分析结果" in str(args.args[1])
+
+    async def test_exception_sends_failure_notice(self):
+        plugin, send = self._make_plugin()
+
+        async def broken_coro():
+            raise RuntimeError("API 爆炸")
+
+        plugin._run_background_analysis("umo1", broken_coro())
+        task = next(iter(plugin._bg_tasks))
+        await task
+
+        send.assert_awaited_once()
+        assert "音频分析失败" in str(send.await_args.args[1])
+
+    async def test_send_failure_does_not_crash(self):
+        plugin, send = self._make_plugin(send_side_effect=RuntimeError("平台不可达"))
+
+        async def fake_coro():
+            return "分析结果"
+
+        plugin._run_background_analysis("umo1", fake_coro())
+        task = next(iter(plugin._bg_tasks))
+        await task  # 不应抛出
+
+        send.assert_awaited_once()
+
+    async def test_ai_delivers_when_wakeup_succeeds(self):
+        """AI 唤醒成功发送时，插件不再直接发送（避免重复消息）。"""
+        plugin, send = self._make_plugin()
+        plugin._wake_ai_for_result = AsyncMock(return_value=True)
+
+        async def fake_coro():
+            return "分析结果"
+
+        plugin._run_background_analysis("umo1", fake_coro())
+        task = next(iter(plugin._bg_tasks))
+        await task
+
+        send.assert_not_awaited()
+
+    async def test_wakeup_failure_falls_back_to_direct_send(self):
+        """AI 唤醒失败（异常）时回退为直接发送。"""
+        plugin, send = self._make_plugin()
+        plugin._wake_ai_for_result = AsyncMock(side_effect=RuntimeError("唤醒失败"))
+
+        async def fake_coro():
+            return "分析结果"
+
+        plugin._run_background_analysis("umo1", fake_coro())
+        task = next(iter(plugin._bg_tasks))
+        await task
+
+        send.assert_awaited_once()
+        assert "分析结果" in str(send.await_args.args[1])
+
+
+class TestAudioHintInjection:
+    """音频感知提示注入：引导 LLM 调用分析工具，每音频仅提示一次。"""
+
+    def _make_plugin(self):
+        plugin, _ = TestBackgroundAnalysis()._make_plugin()
+        return plugin
+
+    async def test_pending_hint_injected_once(self):
+        plugin = self._make_plugin()
+        # 模拟缓存钩子记录的新音频提示
+        plugin._pending_hints["umo1"] = ["song.mp3"]
+        plugin._audio_hints["umo1"] = {"song.mp3"}
+
+        req = SimpleNamespace(contexts=[])
+        event = SimpleNamespace(unified_msg_origin="umo1")
+
+        await plugin._on_llm_request(event, req)
+        assert len(req.contexts) == 1
+        assert "音频感知" in req.contexts[0]["content"]
+        assert "song.mp3" in req.contexts[0]["content"]
+
+        # 注入后 pending 清空，第二次不再注入
+        await plugin._on_llm_request(event, req)
+        assert len(req.contexts) == 1
+
+    async def test_no_pending_no_injection(self):
+        plugin = self._make_plugin()
+        req = SimpleNamespace(contexts=[])
+        event = SimpleNamespace(unified_msg_origin="umo1")
+        await plugin._on_llm_request(event, req)
+        assert req.contexts == []
+
+
+class TestAnalyzeCurrentAudioFallback:
+    """analyze_current_audio 在消息无音频时列出缓存（含时间）并引导序号工具。"""
+
+    def _make_plugin(self):
+        plugin, _ = TestBackgroundAnalysis()._make_plugin()
+        return plugin
+
+    def _make_event(self, umo="umo1"):
+        # 空消息链：get_messages 返回 []，extract_file_component 找不到音频
+        return SimpleNamespace(
+            unified_msg_origin=umo,
+            get_messages=lambda: [],
+            message_obj=SimpleNamespace(message=[]),
+            message_str="",
+        )
+
+    async def test_no_audio_no_cache_returns_guidance(self):
+        plugin = self._make_plugin()
+        result = await plugin.analyze_current_audio(self._make_event())
+        assert "先发送音频" in result
+
+    async def test_cached_audios_listed_with_time_and_guidance(self):
+        """不自动分析：列出缓存（含相对时间）并引导序号工具。"""
+        import time as _time
+
+        plugin = self._make_plugin()
+        now = _time.time()
+        plugin._registry["umo1"] = [
+            {
+                "name": "a.mp3",
+                "ref": "/tmp/a.mp3",
+                "is_local": True,
+                "result": None,
+                "received_at": now,
+            },
+            {
+                "name": "b.mp3",
+                "ref": "/tmp/b.mp3",
+                "is_local": True,
+                "result": None,
+                "received_at": now - 7200,
+            },
+        ]
+        result = await plugin.analyze_current_audio(self._make_event())
+        assert "analyze_audio_by_number" in result
+        assert "a.mp3" in result
+        assert "b.mp3" in result
+        assert "刚刚" in result  # a.mp3 是刚刚
+        assert "2小时前" in result  # b.mp3 是 2 小时前
+
+
+class TestFormatAudioList:
+    def test_relative_time_formats(self):
+        import time as _time
+
+        now = _time.time()
+        assert _main._format_relative_time(now) == "刚刚"
+        assert _main._format_relative_time(now - 30) == "刚刚"
+        assert _main._format_relative_time(now - 300) == "5分钟前"
+        assert _main._format_relative_time(now - 7200) == "2小时前"
+        assert _main._format_relative_time(now - 172800) == "2天前"
+
+    def test_audio_list_with_time_and_tag(self):
+        import time as _time
+
+        now = _time.time()
+        items = [
+            {
+                "name": "a.mp3",
+                "ref": "/tmp/a.mp3",
+                "is_local": True,
+                "result": "已分析结果",
+                "received_at": now,
+            },
+            {
+                "name": "b.mp3",
+                "ref": "/tmp/b.mp3",
+                "is_local": True,
+                "result": None,
+                "received_at": now - 3600,
+            },
+        ]
+        text = _main._format_audio_list(items)
+        assert "1. a.mp3（刚刚） [已分析]" in text
+        assert "2. b.mp3（1小时前）" in text

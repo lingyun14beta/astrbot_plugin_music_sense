@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 try:
-    from .audio_utils import AudioError, download_audio_file, extract_file_component, load_audio, load_audio_from_path
+    from .audio_utils import (
+        AudioError,
+        download_audio_file,
+        extract_file_component,
+        load_audio,
+        load_audio_from_path,
+    )
     from .gemini_client import GeminiClient, GeminiClientError
 except ImportError:
-    from audio_utils import AudioError, download_audio_file, extract_file_component, load_audio, load_audio_from_path
+    from audio_utils import (
+        AudioError,
+        download_audio_file,
+        extract_file_component,
+        load_audio,
+        load_audio_from_path,
+    )
     from gemini_client import GeminiClient, GeminiClientError
 
 
@@ -56,6 +68,7 @@ async def resolve_audio_ref(
 
     if item["is_local"]:
         from pathlib import Path
+
         if Path(ref).is_file():
             return ref
         raise AudioError(f"文件已过期或不可访问：{ref}")

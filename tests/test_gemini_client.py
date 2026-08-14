@@ -9,6 +9,7 @@ import pytest
 from gemini_client import (
     GeminiClient,
     GeminiClientError,
+    _extract_error_message,
     _is_retryable_error,
     _parse_response,
 )
@@ -204,6 +205,24 @@ class TestIsRetryableError:
 
     def test_not_retryable(self):
         assert _is_retryable_error("Invalid API key") is False
+
+
+class TestExtractErrorMessage:
+    def test_json_error_message(self):
+        raw = json.dumps({"error": {"message": "API quota exceeded"}})
+        assert _extract_error_message(raw) == "API quota exceeded"
+
+    def test_html_gateway_page(self):
+        raw = "<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>"
+        msg = _extract_error_message(raw)
+        assert "网关" in msg
+        assert "HTML 错误页" in msg
+
+    def test_empty(self):
+        assert _extract_error_message("") == ""
+
+    def test_plain_text_fallback(self):
+        assert _extract_error_message("some plain text") == "some plain text"
 
 
 class TestAnalyzeWithoutApiKey:

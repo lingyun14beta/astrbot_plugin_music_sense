@@ -201,6 +201,15 @@ def _parse_response(raw: str) -> str:
 
 
 def _extract_error_message(raw: str) -> str:
+    if not raw:
+        return ""
+    if raw.lstrip().startswith("<"):
+        # 网关返回 HTML 错误页（nginx/反代），常见于请求体过大或上游错误
+        return (
+            "网关返回 HTML 错误页（可能为反向代理限制请求大小，"
+            "或上游服务错误）。可尝试降低「最大文件大小（MB）」"
+            "或更换接入方（官方接口/限额更大的中转站）。"
+        )
     try:
         data = json.loads(raw)
         if isinstance(data, dict):
